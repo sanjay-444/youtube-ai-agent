@@ -225,6 +225,7 @@ TRANSCRIPT:
 """
 
     result = call_groq_json(
+         "You are an expert YouTube video analyst. Return only valid JSON.",
         prompt
     )
 
@@ -313,6 +314,7 @@ TRANSCRIPT:
 """
 
     result = call_groq_json(
+        "You are an expert video analyst. Return only valid JSON.",
         prompt
     )
 
@@ -438,6 +440,7 @@ TRANSCRIPT:
 """
 
     result = call_groq_json(
+        "You are an expert video analyst. Return only valid JSON.",
         prompt
     )
 
