@@ -62,7 +62,7 @@ def root():
 # HEALTH CHECK
 # ============================================================
 
-@app.get("/health")
+@app.get("/api/health")
 def health():
 
     return {
@@ -75,7 +75,7 @@ def health():
 # ANALYZE VIDEO
 # ============================================================
 
-@app.post("/analyze")
+@app.post("/api/analyze")
 def analyze_video(request: AnalyzeRequest):
 
     youtube_url = request.youtube_url.strip()
