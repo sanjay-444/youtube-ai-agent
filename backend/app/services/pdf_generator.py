@@ -1,34 +1,42 @@
-# ============================================================
-# PDF GENERATOR
-# ============================================================
-
-from pathlib import Path
-from datetime import datetime
+import os
 import re
-import unicodedata
+import tempfile
+from datetime import datetime
+from pathlib import Path
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
     Spacer,
     Table,
     TableStyle,
-    PageBreak,
 )
 
 
 # ============================================================
-# OUTPUT DIRECTORY
+# VERCEL-SAFE OUTPUT DIRECTORY
+# ============================================================
+#
+# Vercel's deployed filesystem is read-only.
+#
+# DO NOT use:
+#
+#     Path("output")
+#
+#     /var/task/output
+#
+# Instead, use the temporary writable directory.
+#
+# Files stored here are temporary and should be returned
+# immediately to the client.
+#
 # ============================================================
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-
-OUTPUT_DIR = BASE_DIR / "output"
+OUTPUT_DIR = Path(tempfile.gettempdir()) / "youtube_ai_agent"
 
 OUTPUT_DIR.mkdir(
     parents=True,
@@ -42,157 +50,81 @@ OUTPUT_DIR.mkdir(
 
 def clean_text(value):
     """
-    Convert Unicode text into PDF-safe ASCII text.
-
-    This prevents black square boxes caused by unsupported
-    Unicode characters in ReportLab fonts.
+    Convert any value into clean text suitable for a PDF.
     """
 
     if value is None:
         return ""
 
-    # --------------------------------------------------------
-    # Convert everything to string
-    # --------------------------------------------------------
+    if isinstance(value, str):
+        return value.strip()
 
-    text = str(value)
+    return str(value)
 
-    # --------------------------------------------------------
-    # Unicode normalization
-    # --------------------------------------------------------
 
-    text = unicodedata.normalize(
-        "NFKC",
-        text
-    )
+# ============================================================
+# HTML / REPORTLAB SAFE TEXT
+# ============================================================
 
-    # --------------------------------------------------------
-    # Replace problematic Unicode characters
-    # --------------------------------------------------------
+def pdf_safe(value):
+    """
+    Convert text into a format that ReportLab can safely render.
 
+    This protects the PDF generator from common special
+    characters and accidental HTML characters.
+    """
+
+    text = clean_text(value)
+
+    if not text:
+        return ""
+
+    # Remove null characters
+    text = text.replace("\x00", "")
+
+    # Common Unicode replacements
     replacements = {
-
-        # Hyphens / dashes
-        "\u2010": "-",   # hyphen
-        "\u2011": "-",   # non-breaking hyphen
-        "\u2012": "-",   # figure dash
-        "\u2013": "-",   # en dash
-        "\u2014": "-",   # em dash
-        "\u2015": "-",   # horizontal bar
-        "\u2212": "-",   # minus sign
-
-        # Bullets
-        "\u2022": "-",
-        "\u2023": "-",
-        "\u25CF": "-",
-        "\u25AA": "-",
-        "\u25AB": "-",
-
-        # Quotes
         "\u2018": "'",
         "\u2019": "'",
-        "\u201A": "'",
-        "\u201B": "'",
-
-        "\u201C": '"',
-        "\u201D": '"',
-        "\u201E": '"',
-        "\u201F": '"',
-
-        # Ellipsis
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
         "\u2026": "...",
-
-        # Spaces
-        "\u00A0": " ",
-        "\u2000": " ",
-        "\u2001": " ",
-        "\u2002": " ",
-        "\u2003": " ",
-        "\u2004": " ",
-        "\u2005": " ",
-        "\u2006": " ",
-        "\u2007": " ",
-        "\u2008": " ",
-        "\u2009": " ",
-        "\u200A": " ",
-        "\u202F": " ",
-        "\u205F": " ",
-        "\u3000": " ",
-
-        # Zero width characters
-        "\u200B": "",
-        "\u200C": "",
-        "\u200D": "",
-        "\u2060": "",
-        "\uFEFF": "",
-
-        # Other common symbols
-        "\u00AD": "-",    # soft hyphen
+        "\u00a0": " ",
+        "\u2022": "-",
+        "\u2192": "->",
+        "\u00b7": "-",
+        "\u2713": "OK",
+        "\u2714": "OK",
+        "\u2717": "X",
+        "\u2718": "X",
+        "\u26a0": "Warning",
     }
 
     for old, new in replacements.items():
-
-        text = text.replace(
-            old,
-            new
-        )
-
-    # --------------------------------------------------------
-    # Remove remaining control characters
-    # --------------------------------------------------------
-
-    text = "".join(
-        ch
-        for ch in text
-        if ch in "\n\r\t"
-        or ord(ch) >= 32
-    )
-
-    # --------------------------------------------------------
-    # Convert remaining non-ASCII characters
-    #
-    # Example:
-    # café -> cafe
-    # naïve -> naive
-    # --------------------------------------------------------
-
-    text = (
-        unicodedata
-        .normalize("NFKD", text)
-        .encode("ascii", "ignore")
-        .decode("ascii")
-    )
-
-    # --------------------------------------------------------
-    # Clean excessive whitespace
-    # --------------------------------------------------------
-
-    text = re.sub(
-        r"[ \t]+",
-        " ",
-        text
-    )
-
-    text = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        text
-    )
+        text = text.replace(old, new)
 
     return text.strip()
 
 
 # ============================================================
-# HTML / REPORTLAB ESCAPING
+# ESCAPE REPORTLAB XML
 # ============================================================
 
-def escape_xml(text):
+def escape_xml(value):
     """
-    Escape characters that have special meaning in ReportLab
-    Paragraph XML.
+    Escape characters that ReportLab Paragraph interprets
+    as XML/HTML.
+
+    This prevents errors when AI-generated text contains:
+        <
+        >
+        &
     """
 
-    text = clean_text(text)
+    text = pdf_safe(value)
 
     text = (
         text
@@ -205,199 +137,26 @@ def escape_xml(text):
 
 
 # ============================================================
-# PARAGRAPH HELPER
+# SAFE FILENAME
 # ============================================================
 
-def make_paragraph(
-    text,
-    style
-):
+def safe_filename(text):
     """
-    Always clean text before sending it to ReportLab.
+    Create a filesystem-safe filename.
     """
 
-    return Paragraph(
-        escape_xml(text),
-        style
+    text = clean_text(text)
+
+    if not text:
+        text = "youtube_analysis"
+
+    text = re.sub(
+        r"[^a-zA-Z0-9_-]",
+        "_",
+        text
     )
 
-
-# ============================================================
-# STYLES
-# ============================================================
-
-styles = getSampleStyleSheet()
-
-
-TITLE_STYLE = ParagraphStyle(
-    "CustomTitle",
-
-    parent=styles["Title"],
-
-    fontName="Helvetica-Bold",
-
-    fontSize=20,
-
-    leading=24,
-
-    alignment=TA_CENTER,
-
-    spaceAfter=10,
-
-    textColor=colors.HexColor(
-        "#1F5FE8"
-    ),
-)
-
-
-SUBTITLE_STYLE = ParagraphStyle(
-    "Subtitle",
-
-    parent=styles["Normal"],
-
-    fontName="Helvetica",
-
-    fontSize=9,
-
-    leading=12,
-
-    alignment=TA_CENTER,
-
-    spaceAfter=15,
-)
-
-
-HEADING_STYLE = ParagraphStyle(
-    "Heading",
-
-    parent=styles["Heading2"],
-
-    fontName="Helvetica-Bold",
-
-    fontSize=14,
-
-    leading=18,
-
-    spaceBefore=8,
-
-    spaceAfter=8,
-
-    textColor=colors.HexColor(
-        "#2463EB"
-    ),
-)
-
-
-BODY_STYLE = ParagraphStyle(
-    "Body",
-
-    parent=styles["BodyText"],
-
-    fontName="Helvetica",
-
-    fontSize=10,
-
-    leading=14,
-
-    spaceAfter=6,
-)
-
-
-BULLET_STYLE = ParagraphStyle(
-    "Bullet",
-
-    parent=BODY_STYLE,
-
-    leftIndent=12,
-
-    firstLineIndent=-8,
-
-    spaceAfter=5,
-)
-
-
-SMALL_STYLE = ParagraphStyle(
-    "Small",
-
-    parent=styles["Normal"],
-
-    fontName="Helvetica",
-
-    fontSize=8,
-
-    leading=10,
-)
-
-
-# ============================================================
-# PAGE NUMBER
-# ============================================================
-
-def add_page_number(
-    canvas,
-    doc
-):
-
-    canvas.saveState()
-
-    canvas.setFont(
-        "Helvetica",
-        8
-    )
-
-    canvas.setFillColor(
-        colors.grey
-    )
-
-    canvas.drawCentredString(
-        A4[0] / 2,
-        12 * mm,
-        f"Page {doc.page}"
-    )
-
-    canvas.restoreState()
-
-
-# ============================================================
-# NORMALIZE LIST
-# ============================================================
-
-def normalize_list(value):
-
-    if value is None:
-        return []
-
-    if isinstance(value, list):
-
-        return value
-
-    return [value]
-
-
-# ============================================================
-# GET VALUE
-# ============================================================
-
-def get_value(
-    data,
-    key,
-    default=""
-):
-
-    if not isinstance(data, dict):
-
-        return default
-
-    value = data.get(
-        key,
-        default
-    )
-
-    if value is None:
-
-        return default
-
-    return value
+    return text[:80]
 
 
 # ============================================================
@@ -405,71 +164,153 @@ def get_value(
 # ============================================================
 
 def generate_pdf(
-    youtube_url,
-    summary=None,
-    action_items=None,
-    evaluation=None,
-    quality_score=0,
-    output_filename=None
+    summary,
+    action_items,
+    evaluation,
+    youtube_url="",
+    output_dir=None,
 ):
+    """
+    Generate a PDF report from the AI analysis.
 
-    # --------------------------------------------------------
-    # Normalize input
-    # --------------------------------------------------------
+    Vercel-safe implementation.
 
-    summary = summary or {}
+    Parameters
+    ----------
+    summary:
+        Dictionary containing:
+            executive_summary
+            key_takeaways
+            important_concepts
+            conclusion
 
-    action_items = (
-        action_items
-        or []
+    action_items:
+        List of dictionaries containing:
+            action
+            priority
+            reason/details
+
+    evaluation:
+        Dictionary containing:
+            quality_score
+            summary_score
+            action_items_score
+            feedback
+
+    youtube_url:
+        Original YouTube video URL.
+
+    output_dir:
+        Optional custom output directory.
+
+        If not supplied, the Vercel-safe temporary directory
+        is used.
+
+    Returns
+    -------
+    str
+        Absolute path to generated PDF.
+    """
+
+    # ========================================================
+    # OUTPUT DIRECTORY
+    # ========================================================
+
+    if output_dir is None:
+        output_path = OUTPUT_DIR
+    else:
+        output_path = Path(output_dir)
+
+    # Make sure directory exists
+    output_path.mkdir(
+        parents=True,
+        exist_ok=True
     )
 
-    evaluation = (
-        evaluation
-        or {}
+    # ========================================================
+    # FILE NAME
+    # ========================================================
+
+    timestamp = datetime.now().strftime(
+        "%Y%m%d_%H%M%S_%f"
     )
 
-    # --------------------------------------------------------
-    # Filename
-    # --------------------------------------------------------
-
-    if not output_filename:
-
-        timestamp = datetime.now().strftime(
-            "%Y%m%d_%H%M%S"
-        )
-
-        output_filename = (
-            f"youtube_analysis_{timestamp}.pdf"
-        )
-
-    output_path = (
-        OUTPUT_DIR /
-        output_filename
+    filename = (
+        f"youtube_analysis_{timestamp}.pdf"
     )
 
-    # --------------------------------------------------------
-    # Document
-    # --------------------------------------------------------
+    pdf_path = output_path / filename
+
+    # ========================================================
+    # NORMALIZE INPUTS
+    # ========================================================
+
+    if not isinstance(summary, dict):
+        summary = {}
+
+    if not isinstance(action_items, list):
+        action_items = []
+
+    if not isinstance(evaluation, dict):
+        evaluation = {}
+
+    # ========================================================
+    # DOCUMENT
+    # ========================================================
 
     document = SimpleDocTemplate(
-
-        str(output_path),
-
+        str(pdf_path),
         pagesize=A4,
-
-        rightMargin=18 * mm,
-
-        leftMargin=18 * mm,
-
-        topMargin=18 * mm,
-
-        bottomMargin=20 * mm,
-
-        title="YouTube Video Analysis",
-
-        author="YouTube AI Analyzer"
+        rightMargin=45,
+        leftMargin=45,
+        topMargin=45,
+        bottomMargin=45,
+        title="YouTube AI Video Analysis",
+        author="YouTube AI Video Analyzer",
     )
+
+    # ========================================================
+    # STYLES
+    # ========================================================
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Title"],
+        alignment=TA_CENTER,
+        fontSize=22,
+        leading=28,
+        spaceAfter=15,
+    )
+
+    heading_style = ParagraphStyle(
+        "Heading",
+        parent=styles["Heading2"],
+        fontSize=15,
+        leading=19,
+        spaceBefore=12,
+        spaceAfter=8,
+    )
+
+    body_style = ParagraphStyle(
+        "Body",
+        parent=styles["BodyText"],
+        fontSize=10.5,
+        leading=16,
+        spaceAfter=8,
+    )
+
+    small_style = ParagraphStyle(
+        "Small",
+        parent=styles["BodyText"],
+        fontSize=8.5,
+        leading=12,
+    )
+
+    # ========================================================
+    # STORY
+    # ========================================================
 
     story = []
 
@@ -478,24 +319,48 @@ def generate_pdf(
     # ========================================================
 
     story.append(
-        make_paragraph(
+        Paragraph(
             "YouTube AI Video Analysis",
-            TITLE_STYLE
+            title_style
         )
     )
 
     story.append(
-        make_paragraph(
-            f"Video: {youtube_url}",
-            SUBTITLE_STYLE
+        Paragraph(
+            escape_xml(
+                f"Generated: "
+                f"{datetime.now().strftime('%d-%m-%Y %H:%M:%S')}"
+            ),
+            small_style
         )
     )
 
     story.append(
-        Spacer(
-            1,
-            5
+        Spacer(1, 15)
+    )
+
+    # ========================================================
+    # VIDEO URL
+    # ========================================================
+
+    story.append(
+        Paragraph(
+            "Video",
+            heading_style
         )
+    )
+
+    if youtube_url:
+
+        story.append(
+            Paragraph(
+                escape_xml(youtube_url),
+                small_style
+            )
+        )
+
+    story.append(
+        Spacer(1, 10)
     )
 
     # ========================================================
@@ -503,25 +368,16 @@ def generate_pdf(
     # ========================================================
 
     story.append(
-        make_paragraph(
-            "EXECUTIVE SUMMARY",
-            HEADING_STYLE
+        Paragraph(
+            "Executive Summary",
+            heading_style
         )
     )
 
-    executive_summary = get_value(
-        summary,
+    executive_summary = summary.get(
         "executive_summary",
         ""
     )
-
-    if not executive_summary:
-
-        executive_summary = get_value(
-            summary,
-            "summary",
-            ""
-        )
 
     if not executive_summary:
 
@@ -530,57 +386,95 @@ def generate_pdf(
         )
 
     story.append(
-        make_paragraph(
-            executive_summary,
-            BODY_STYLE
+        Paragraph(
+            escape_xml(executive_summary),
+            body_style
         )
     )
 
     # ========================================================
-    # KEY POINTS
+    # KEY TAKEAWAYS
     # ========================================================
 
     story.append(
-        make_paragraph(
-            "KEY POINTS",
-            HEADING_STYLE
+        Paragraph(
+            "Key Takeaways",
+            heading_style
         )
     )
 
-    key_points = get_value(
-        summary,
-        "key_points",
+    key_takeaways = summary.get(
+        "key_takeaways",
         []
     )
 
-    key_points = normalize_list(
-        key_points
-    )
+    if not isinstance(key_takeaways, list):
+        key_takeaways = []
 
-    if not key_points:
+    if key_takeaways:
 
-        key_points = [
-            "No key points were generated."
-        ]
+        for index, item in enumerate(
+            key_takeaways,
+            start=1
+        ):
 
-    for point in key_points:
+            story.append(
+                Paragraph(
+                    f"{index}. "
+                    f"{escape_xml(item)}",
+                    body_style
+                )
+            )
 
-        clean_point = clean_text(
-            point
-        )
-
-        # Always use ASCII hyphen
-        # instead of Unicode bullet
-
-        bullet_text = (
-            "- "
-            + clean_point
-        )
+    else:
 
         story.append(
-            make_paragraph(
-                bullet_text,
-                BULLET_STYLE
+            Paragraph(
+                "No key takeaways generated.",
+                body_style
+            )
+        )
+
+    # ========================================================
+    # IMPORTANT CONCEPTS
+    # ========================================================
+
+    story.append(
+        Paragraph(
+            "Important Concepts",
+            heading_style
+        )
+    )
+
+    concepts = summary.get(
+        "important_concepts",
+        []
+    )
+
+    if not isinstance(concepts, list):
+        concepts = []
+
+    if concepts:
+
+        for index, concept in enumerate(
+            concepts,
+            start=1
+        ):
+
+            story.append(
+                Paragraph(
+                    f"{index}. "
+                    f"{escape_xml(concept)}",
+                    body_style
+                )
+            )
+
+    else:
+
+        story.append(
+            Paragraph(
+                "No important concepts generated.",
+                body_style
             )
         )
 
@@ -589,215 +483,205 @@ def generate_pdf(
     # ========================================================
 
     story.append(
-        make_paragraph(
-            "ACTION ITEMS",
-            HEADING_STYLE
+        Paragraph(
+            "Action Items",
+            heading_style
         )
     )
 
-    action_items = normalize_list(
-        action_items
-    )
-
-    table_data = [
-
-        [
-            make_paragraph(
-                "Priority",
-                SMALL_STYLE
-            ),
-
-            make_paragraph(
-                "Action",
-                SMALL_STYLE
-            )
-        ]
-    ]
-
     if action_items:
 
-        for item in action_items:
+        data = [
+            [
+                "No.",
+                "Action",
+                "Priority",
+                "Details / Reason",
+            ]
+        ]
 
-            if isinstance(
-                item,
-                dict
-            ):
+        for index, item in enumerate(
+            action_items,
+            start=1
+        ):
 
-                priority = get_value(
-                    item,
-                    "priority",
-                    "MEDIUM"
-                )
+            if isinstance(item, dict):
 
-                action = get_value(
-                    item,
+                action = item.get(
                     "action",
                     ""
                 )
 
-                reason = get_value(
-                    item,
-                    "reason",
+                priority = item.get(
+                    "priority",
                     ""
                 )
 
-                action_text = (
-                    clean_text(action)
-                )
-
-                if reason:
-
-                    action_text += (
-                        "<br/><font size='8'>"
-                        "Reason: "
-                        + escape_xml(reason)
-                        + "</font>"
+                reason = item.get(
+                    "reason",
+                    item.get(
+                        "details",
+                        ""
                     )
-
-                table_data.append(
-
-                    [
-
-                        make_paragraph(
-                            priority,
-                            SMALL_STYLE
-                        ),
-
-                        Paragraph(
-                            action_text,
-                            SMALL_STYLE
-                        )
-
-                    ]
                 )
 
             else:
 
-                table_data.append(
+                action = str(item)
+                priority = ""
+                reason = ""
 
-                    [
+            data.append(
+                [
+                    str(index),
 
-                        make_paragraph(
-                            "MEDIUM",
-                            SMALL_STYLE
-                        ),
+                    Paragraph(
+                        escape_xml(action),
+                        small_style
+                    ),
 
-                        make_paragraph(
-                            item,
-                            SMALL_STYLE
-                        )
+                    Paragraph(
+                        escape_xml(priority),
+                        small_style
+                    ),
 
-                    ]
-                )
+                    Paragraph(
+                        escape_xml(reason),
+                        small_style
+                    ),
+                ]
+            )
+
+        # ====================================================
+        # ACTION TABLE
+        # ====================================================
+
+        table = Table(
+            data,
+            colWidths=[
+                35,
+                180,
+                65,
+                180,
+            ],
+            repeatRows=1,
+        )
+
+        table.setStyle(
+            TableStyle(
+                [
+
+                    # Header background
+                    (
+                        "BACKGROUND",
+                        (0, 0),
+                        (-1, 0),
+                        colors.lightgrey,
+                    ),
+
+                    # Header text
+                    (
+                        "TEXTCOLOR",
+                        (0, 0),
+                        (-1, 0),
+                        colors.black,
+                    ),
+
+                    # Header font
+                    (
+                        "FONTNAME",
+                        (0, 0),
+                        (-1, 0),
+                        "Helvetica-Bold",
+                    ),
+
+                    # Grid
+                    (
+                        "GRID",
+                        (0, 0),
+                        (-1, -1),
+                        0.5,
+                        colors.grey,
+                    ),
+
+                    # Vertical alignment
+                    (
+                        "VALIGN",
+                        (0, 0),
+                        (-1, -1),
+                        "TOP",
+                    ),
+
+                    # Padding
+                    (
+                        "LEFTPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        5,
+                    ),
+
+                    (
+                        "RIGHTPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        5,
+                    ),
+
+                    (
+                        "TOPPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        5,
+                    ),
+
+                    (
+                        "BOTTOMPADDING",
+                        (0, 0),
+                        (-1, -1),
+                        5,
+                    ),
+                ]
+            )
+        )
+
+        story.append(table)
 
     else:
 
-        table_data.append(
-
-            [
-
-                make_paragraph(
-                    "INFO",
-                    SMALL_STYLE
-                ),
-
-                make_paragraph(
-                    "No action items were identified.",
-                    SMALL_STYLE
-                )
-
-            ]
+        story.append(
+            Paragraph(
+                "No action items generated.",
+                body_style
+            )
         )
 
-    action_table = Table(
-
-        table_data,
-
-        colWidths=[
-            35 * mm,
-            125 * mm
-        ],
-
-        repeatRows=1
-    )
-
-    action_table.setStyle(
-
-        TableStyle(
-
-            [
-
-                (
-                    "BACKGROUND",
-                    (0, 0),
-                    (-1, 0),
-                    colors.HexColor("#E5E7EB")
-                ),
-
-                (
-                    "TEXTCOLOR",
-                    (0, 0),
-                    (-1, 0),
-                    colors.black
-                ),
-
-                (
-                    "FONTNAME",
-                    (0, 0),
-                    (-1, 0),
-                    "Helvetica-Bold"
-                ),
-
-                (
-                    "GRID",
-                    (0, 0),
-                    (-1, -1),
-                    0.5,
-                    colors.HexColor("#D1D5DB")
-                ),
-
-                (
-                    "VALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "TOP"
-                ),
-
-                (
-                    "LEFTPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    7
-                ),
-
-                (
-                    "RIGHTPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    7
-                ),
-
-                (
-                    "TOPPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    7
-                ),
-
-                (
-                    "BOTTOMPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    7
-                ),
-
-            ]
-
-        )
-    )
+    # ========================================================
+    # CONCLUSION
+    # ========================================================
 
     story.append(
-        action_table
+        Paragraph(
+            "Conclusion",
+            heading_style
+        )
+    )
+
+    conclusion = summary.get(
+        "conclusion",
+        ""
+    )
+
+    if not conclusion:
+
+        conclusion = (
+            "No conclusion was generated."
+        )
+
+    story.append(
+        Paragraph(
+            escape_xml(conclusion),
+            body_style
+        )
     )
 
     # ========================================================
@@ -805,73 +689,214 @@ def generate_pdf(
     # ========================================================
 
     story.append(
-        make_paragraph(
-            "QUALITY EVALUATION",
-            HEADING_STYLE
+        Paragraph(
+            "Evaluation",
+            heading_style
         )
     )
 
-    score_text = (
-        f"Overall Quality Score: "
-        f"{clean_text(quality_score)}/100"
+    quality_score = evaluation.get(
+        "quality_score",
+        "N/A"
+    )
+
+    summary_score = evaluation.get(
+        "summary_score",
+        "N/A"
+    )
+
+    action_score = evaluation.get(
+        "action_items_score",
+        "N/A"
+    )
+
+    feedback = evaluation.get(
+        "feedback",
+        ""
+    )
+
+    evaluation_data = [
+        [
+            "Metric",
+            "Score"
+        ],
+        [
+            "Overall Quality",
+            f"{quality_score}/10",
+        ],
+        [
+            "Summary",
+            f"{summary_score}/10",
+        ],
+        [
+            "Action Items",
+            f"{action_score}/10",
+        ],
+    ]
+
+    evaluation_table = Table(
+        evaluation_data,
+        colWidths=[
+            250,
+            120
+        ],
+    )
+
+    evaluation_table.setStyle(
+        TableStyle(
+            [
+
+                # Header
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (-1, 0),
+                    colors.lightgrey,
+                ),
+
+                (
+                    "FONTNAME",
+                    (0, 0),
+                    (-1, 0),
+                    "Helvetica-Bold",
+                ),
+
+                # Grid
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.5,
+                    colors.grey,
+                ),
+
+                # Score alignment
+                (
+                    "ALIGN",
+                    (1, 1),
+                    (1, -1),
+                    "CENTER",
+                ),
+
+                # Vertical alignment
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "MIDDLE",
+                ),
+
+                # Padding
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5,
+                ),
+
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5,
+                ),
+
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5,
+                ),
+
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    5,
+                ),
+            ]
+        )
     )
 
     story.append(
-        make_paragraph(
-            score_text,
-            BODY_STYLE
+        evaluation_table
+    )
+
+    story.append(
+        Spacer(1, 10)
+    )
+
+    # ========================================================
+    # EVALUATOR FEEDBACK
+    # ========================================================
+
+    story.append(
+        Paragraph(
+            f"<b>Evaluator Feedback:</b> "
+            f"{escape_xml(feedback)}",
+            body_style
         )
     )
 
-    if evaluation:
+    # ========================================================
+    # FOOTER
+    # ========================================================
 
-        evaluation_text = get_value(
-            evaluation,
-            "feedback",
-            ""
+    story.append(
+        Spacer(1, 20)
+    )
+
+    story.append(
+        Paragraph(
+            "Generated by YouTube AI Video Analyzer",
+            small_style
         )
-
-        if evaluation_text:
-
-            story.append(
-                make_paragraph(
-                    evaluation_text,
-                    BODY_STYLE
-                )
-            )
+    )
 
     # ========================================================
     # BUILD PDF
     # ========================================================
 
     document.build(
-
-        story,
-
-        onFirstPage=add_page_number,
-
-        onLaterPages=add_page_number
+        story
     )
 
     # ========================================================
-    # VERIFY
+    # VALIDATE FILE
     # ========================================================
 
-    if not output_path.exists():
+    if not pdf_path.exists():
 
         raise RuntimeError(
-            "PDF generation failed."
+            "PDF generation completed but "
+            "file was not created."
         )
 
-    if output_path.stat().st_size == 0:
+    pdf_size = pdf_path.stat().st_size
+
+    if pdf_size <= 0:
 
         raise RuntimeError(
             "Generated PDF is empty."
         )
 
+    print()
     print(
-        f"PDF generated successfully: "
-        f"{output_path}"
+        "[PDF] PDF generated successfully:"
     )
 
-    return str(output_path)
+    print(
+        f"[PDF] {pdf_path}"
+    )
+
+    print(
+        f"[PDF] Size: {pdf_size} bytes"
+    )
+
+    # ========================================================
+    # RETURN
+    # ========================================================
+
+    return str(
+        pdf_path.resolve()
+    )

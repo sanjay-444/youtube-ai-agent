@@ -6,3 +6,4 @@ youtube-transcript-api
 reportlab
 pydantic
 python-dotenv
+requests
