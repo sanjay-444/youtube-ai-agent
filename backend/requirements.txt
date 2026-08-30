@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+langgraph
+groq
+youtube-transcript-api
+reportlab
+pydantic
+python-dotenv

@@ -1,0 +1,41 @@
+Welcome back everyone. In this tutorial we are going to build a FastAPI application.
+
+First, install Python and create a virtual environment.
+
+Create the virtual environment using:
+
+python -m venv venv
+
+Activate the virtual environment and install FastAPI and Uvicorn:
+
+pip install fastapi uvicorn
+
+Next, create a file called main.py.
+
+Inside main.py, create a FastAPI application and add a simple GET endpoint.
+
+Run the application using:
+
+uvicorn main:app --reload
+
+Open the browser and visit the Swagger documentation at /docs.
+
+The next step is to create CRUD APIs. We need endpoints for creating, reading, updating and deleting products.
+
+Use Pydantic models to validate incoming request data.
+
+After implementing the APIs, connect the application to PostgreSQL.
+
+Install SQLAlchemy and the PostgreSQL driver.
+
+Create a database session and use dependency injection to provide the database session to the API endpoints.
+
+Create a Product model containing an ID, name, price and quantity.
+
+Implement GET, POST, PUT and DELETE operations for products.
+
+Finally, configure CORS so that a React frontend can communicate with the FastAPI backend.
+
+Test every endpoint using Swagger UI and verify that the data is correctly stored in PostgreSQL.
+
+The main goal is to build a clean full-stack application using React, FastAPI, SQLAlchemy and PostgreSQL.
