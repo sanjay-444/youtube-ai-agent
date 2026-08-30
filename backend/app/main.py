@@ -15,7 +15,10 @@ from app.agents.graph import build_graph
 app = FastAPI(
     title="YouTube AI Video Analyzer",
     description="Analyze any YouTube video and generate an AI-powered PDF report.",
-    version="1.0.0"
+    version="1.0.0",
+      docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json"
 )
 
 
