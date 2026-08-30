@@ -48,7 +48,7 @@ class AnalyzeRequest(BaseModel):
 # ROOT
 # ============================================================
 
-@app.get("/")
+@app.get("/api/")
 def root():
 
     return {
