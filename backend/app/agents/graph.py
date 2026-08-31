@@ -1,4 +1,14 @@
-from typing import Any, Dict, List, TypedDict
+# ============================================================
+# graph.py
+# YouTube AI Video Analyzer - Agentic AI Graph
+# ============================================================
+
+import json
+import re
+import unicodedata
+from datetime import datetime
+from pathlib import Path
+from typing import TypedDict, Optional, Dict, Any, List
 
 from langgraph.graph import StateGraph, END
 
@@ -8,14 +18,14 @@ from app.services.pdf_generator import generate_pdf
 
 
 # ============================================================
-# AGENT STATE
+# STATE
 # ============================================================
 
-class AgentState(TypedDict, total=False):
+class VideoState(TypedDict, total=False):
 
     youtube_url: str
 
-    transcript: str
+    transcript: Optional[str]
 
     analysis_context: str
 
@@ -31,57 +41,323 @@ class AgentState(TypedDict, total=False):
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# TEXT CLEANER
 # ============================================================
 
-def safe_string(value: Any) -> str:
+def clean_text(value: Any) -> str:
 
     if value is None:
         return ""
 
+    text = str(value)
+
+    # Unicode normalization
+    text = unicodedata.normalize(
+        "NFKC",
+        text
+    )
+
+    replacements = {
+
+        # Dashes
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2015": "-",
+        "\u2212": "-",
+
+        # Bullets
+        "\u2022": "-",
+        "\u2023": "-",
+        "\u2043": "-",
+
+        # Squares
+        "\u25A0": "-",
+        "\u25AA": "-",
+        "\u25AB": "-",
+        "\u25FE": "-",
+        "\u25FF": "-",
+
+        # Replacement character
+        "\uFFFD": "-",
+
+        # Quotes
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201A": "'",
+        "\u201B": "'",
+
+        "\u201C": '"',
+        "\u201D": '"',
+        "\u201E": '"',
+        "\u201F": '"',
+
+        # Ellipsis
+        "\u2026": "...",
+
+        # Spaces
+        "\u00A0": " ",
+        "\u2000": " ",
+        "\u2001": " ",
+        "\u2002": " ",
+        "\u2003": " ",
+        "\u2004": " ",
+        "\u2005": " ",
+        "\u2006": " ",
+        "\u2007": " ",
+        "\u2008": " ",
+        "\u2009": " ",
+        "\u200A": " ",
+        "\u202F": " ",
+        "\u205F": " ",
+        "\u3000": " ",
+
+        # Invisible characters
+        "\u200B": "",
+        "\u200C": "",
+        "\u200D": "",
+        "\u2060": "",
+        "\uFEFF": "",
+
+        # Soft hyphen
+        "\u00AD": "-"
+    }
+
+    for old, new in replacements.items():
+
+        text = text.replace(
+            old,
+            new
+        )
+
+    # Remove unsupported control characters
+    result = []
+
+    for char in text:
+
+        code = ord(char)
+
+        if char in "\n\r\t":
+
+            result.append(char)
+
+        elif code >= 32:
+
+            result.append(char)
+
+    text = "".join(result)
+
+    # Convert remaining unsupported Unicode to ASCII
+    text = (
+        unicodedata
+        .normalize(
+            "NFKD",
+            text
+        )
+        .encode(
+            "ascii",
+            "ignore"
+        )
+        .decode(
+            "ascii"
+        )
+    )
+
+    # Final safety replacements
+    text = text.replace(
+        "■",
+        "-"
+    )
+
+    text = text.replace(
+        "□",
+        "-"
+    )
+
+    text = text.replace(
+        "�",
+        "-"
+    )
+
+    # Whitespace cleanup
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text
+    )
+
+    return text.strip()
+
+
+# ============================================================
+# RECURSIVE CLEANER
+# ============================================================
+
+def clean_data(value: Any):
+
     if isinstance(value, str):
-        return value
 
-    return str(value)
+        return clean_text(
+            value
+        )
 
-
-def extract_json_result(result: Any) -> Dict[str, Any]:
-
-    if result is None:
-        return {}
-
-    if isinstance(result, dict):
-        return result
-
-    if hasattr(result, "content"):
-
-        content = result.content
-
-        if isinstance(content, dict):
-            return content
+    if isinstance(value, dict):
 
         return {
-            "result": content
+            key: clean_data(item)
+            for key, item in value.items()
         }
 
-    return {
-        "result": str(result)
-    }
+    if isinstance(value, list):
+
+        return [
+            clean_data(item)
+            for item in value
+        ]
+
+    return value
+
+
+# ============================================================
+# JSON PARSER
+# ============================================================
+
+def parse_json_response(
+    response: Any
+):
+
+    if response is None:
+
+        raise RuntimeError(
+            "Groq returned an empty response."
+        )
+
+    # Already dictionary
+    if isinstance(
+        response,
+        dict
+    ):
+
+        return clean_data(
+            response
+        )
+
+    # LangChain-like response
+    if hasattr(
+        response,
+        "content"
+    ):
+
+        response = response.content
+
+    text = str(
+        response
+    ).strip()
+
+    if not text:
+
+        raise RuntimeError(
+            "Groq returned an empty response."
+        )
+
+    # Remove markdown code fences
+    text = re.sub(
+        r"```json",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = text.replace(
+        "```",
+        ""
+    ).strip()
+
+    # --------------------------------------------------------
+    # Direct JSON
+    # --------------------------------------------------------
+
+    try:
+
+        return clean_data(
+            json.loads(text)
+        )
+
+    except json.JSONDecodeError:
+
+        pass
+
+    # --------------------------------------------------------
+    # Extract JSON object
+    # --------------------------------------------------------
+
+    start = text.find(
+        "{"
+    )
+
+    end = text.rfind(
+        "}"
+    )
+
+    if start == -1 or end == -1:
+
+        raise RuntimeError(
+            "AI response did not contain valid JSON."
+        )
+
+    json_text = text[
+        start:end + 1
+    ]
+
+    try:
+
+        return clean_data(
+            json.loads(json_text)
+        )
+
+    except json.JSONDecodeError as exc:
+
+        print(
+            "\nInvalid Groq JSON:"
+        )
+
+        print(
+            text[:3000]
+        )
+
+        raise RuntimeError(
+            f"Invalid JSON returned by Groq: {exc}"
+        )
 
 
 # ============================================================
 # NODE 1
-# GET YOUTUBE TRANSCRIPT
+# EXTRACT YOUTUBE TRANSCRIPT
 # ============================================================
 
-def transcript_node(
-    state: AgentState
-) -> Dict[str, Any]:
+def extract_transcript_node(
+    state: VideoState
+):
 
-    print("[1] Extracting YouTube transcript...")
+    print()
+    print(
+        "[1] Extracting YouTube transcript..."
+    )
 
-    youtube_url = safe_string(
-        state.get("youtube_url")
+    youtube_url = (
+        state.get(
+            "youtube_url",
+            ""
+        )
+        or ""
     ).strip()
 
     if not youtube_url:
@@ -90,9 +366,42 @@ def transcript_node(
             "YouTube URL is required."
         )
 
+    # --------------------------------------------------------
+    # If transcript was already supplied
+    # --------------------------------------------------------
+
+    existing_transcript = state.get(
+        "transcript"
+    )
+
+    if existing_transcript:
+
+        transcript = clean_text(
+            existing_transcript
+        )
+
+        if transcript:
+
+            print(
+                "Transcript already supplied."
+            )
+
+            print(
+                f"Transcript length: "
+                f"{len(transcript)} characters"
+            )
+
+            return {
+                "transcript": transcript
+            }
+
+    # --------------------------------------------------------
+    # Use our Supadata-enabled youtube.py
+    # --------------------------------------------------------
+
     print(
-        f"Using transcript function: "
-        f"app.services.youtube.get_youtube_transcript"
+        "Using transcript function: "
+        "app.services.youtube.get_youtube_transcript"
     )
 
     try:
@@ -103,28 +412,35 @@ def transcript_node(
 
     except Exception as exc:
 
+        print()
         print(
-            "Transcript retrieval failed:"
+            "TRANSCRIPT RETRIEVAL FAILED"
         )
 
-        print(str(exc))
+        print(
+            f"Error: {exc}"
+        )
 
         raise RuntimeError(
             str(exc)
         )
 
-    transcript = safe_string(
+    transcript = clean_text(
         transcript
     )
 
-    if not transcript.strip():
+    if not transcript:
 
         raise RuntimeError(
             "YouTube transcript is empty."
         )
 
     print(
-        f"Transcript received: "
+        "TRANSCRIPT RETRIEVED SUCCESSFULLY"
+    )
+
+    print(
+        f"Transcript length: "
         f"{len(transcript)} characters"
     )
 
@@ -135,23 +451,29 @@ def transcript_node(
 
 # ============================================================
 # NODE 2
-# PREPARE ANALYSIS CONTEXT
+# PREPARE TRANSCRIPT
 # ============================================================
 
-def context_node(
-    state: AgentState
-) -> Dict[str, Any]:
+def prepare_transcript_node(
+    state: VideoState
+):
 
-    print("[2] Preparing analysis context...")
+    print()
+    print(
+        "[2] Preparing analysis context..."
+    )
 
-    transcript = safe_string(
-        state.get("transcript")
-    ).strip()
+    transcript = clean_text(
+        state.get(
+            "transcript",
+            ""
+        )
+    )
 
     if not transcript:
 
         raise RuntimeError(
-            "Transcript is unavailable."
+            "Transcript is empty."
         )
 
     print(
@@ -159,338 +481,492 @@ def context_node(
         f"{len(transcript)} characters"
     )
 
-    # --------------------------------------------------------
-    # IMPORTANT
+    # ========================================================
+    # IMPORTANT GROQ LIMIT
+    # ========================================================
     #
-    # Groq currently has an 8000 TPM limit for your model.
+    # Your Groq organization currently has:
     #
-    # Your previous 50000 character context produced:
+    # TPM LIMIT = 8000
     #
-    # Requested: 15324 tokens
-    # Limit:      8000 tokens
+    # Previously:
     #
-    # 18000 characters gives us a much safer request size.
-    # --------------------------------------------------------
+    # 18,000 chars -> approximately 8274 tokens
+    #
+    # This caused:
+    #
+    # 413 Payload Too Large
+    #
+    # Therefore we use a smaller context.
+    #
+    # 6,000 characters is much safer.
+    #
+    # ========================================================
 
-    max_characters = 10000
+    MAX_CHARS = 6000
 
-    if len(transcript) > max_characters:
+    if len(transcript) > MAX_CHARS:
 
         print(
             f"Limiting transcript to "
-            f"{max_characters} characters."
+            f"{MAX_CHARS} characters."
         )
 
-        transcript = transcript[
-            :max_characters
+        analysis_context = transcript[
+            :MAX_CHARS
         ]
 
-    context = transcript.strip()
+    else:
+
+        analysis_context = transcript
+
+    analysis_context = analysis_context.strip()
 
     print(
         f"Analysis context prepared: "
-        f"{len(context)} characters"
+        f"{len(analysis_context)} characters"
     )
 
     return {
-        "analysis_context": context
+
+        "transcript":
+            transcript,
+
+        "analysis_context":
+            analysis_context
     }
 
 
 # ============================================================
 # NODE 3
-# GENERATE SUMMARY
+# ANALYZE VIDEO
 # ============================================================
 
-def summary_node(
-    state: AgentState
-) -> Dict[str, Any]:
+def analyze_video_node(
+    state: VideoState
+):
 
-    print("[3] Generating AI summary...")
+    print()
+    print(
+        "[3] Generating AI summary..."
+    )
 
-    context = safe_string(
-        state.get("analysis_context")
-    ).strip()
+    transcript = clean_text(
+        state.get(
+            "analysis_context",
+            ""
+        )
+    )
 
-    if not context:
+    if not transcript:
 
         raise RuntimeError(
             "Analysis context is empty."
         )
 
+    # ========================================================
+    # SYSTEM PROMPT
+    # ========================================================
+
     system_prompt = """
 You are an expert YouTube video analyst.
 
-Analyze the provided transcript carefully.
+Analyze the supplied transcript.
 
 Return ONLY valid JSON.
 
 Do not use Markdown.
+
+Do not use code fences.
+
 Do not add explanations outside JSON.
 
-Use this structure:
+Use ASCII characters only.
+
+Return exactly this structure:
 
 {
-    "title": "Best inferred title",
-    "overview": "Short overview of the video",
-    "summary": "Detailed but concise summary",
-    "key_points": [
-        "Key point 1",
-        "Key point 2",
-        "Key point 3"
-    ],
-    "topics": [
-        "Topic 1",
-        "Topic 2"
-    ],
-    "conclusion": "Main conclusion of the video"
+  "title": "string",
+  "executive_summary": "string",
+  "key_points": [
+    "string",
+    "string",
+    "string"
+  ],
+  "important_concepts": [
+    "string",
+    "string"
+  ],
+  "action_items": [
+    {
+      "action": "string",
+      "priority": "HIGH",
+      "reason": "string"
+    }
+  ],
+  "conclusion": "string"
 }
+
+Rules:
+
+1. Use only information present in the transcript.
+2. Do not invent facts.
+3. Keep the executive summary concise.
+4. Generate 3 to 5 key points.
+5. Generate 2 to 5 important concepts.
+6. Generate useful action items when applicable.
+7. Priority must be HIGH, MEDIUM, or LOW.
+8. Keep the response compact.
+9. Return JSON only.
 """
 
+    # ========================================================
+    # USER PROMPT
+    # ========================================================
+
     user_prompt = f"""
-Analyze the following YouTube transcript.
+Analyze this YouTube transcript.
 
 TRANSCRIPT:
 
-{context}
+{transcript}
+
+Return valid JSON only.
 """
+
+    print()
+    print(
+        "Calling Groq for video analysis..."
+    )
 
     try:
 
-        result = call_groq_json(
+        response = call_groq_json(
+
             system_prompt,
-            user_prompt
+
+            user_prompt,
+
+            # IMPORTANT:
+            # Keep output small enough for
+            # the 8000 TPM limit.
+            max_tokens=1800,
+
+            retries=2
         )
 
     except Exception as exc:
 
+        print()
         print(
-            f"Summary generation failed: {exc}"
+            "SUMMARY GENERATION FAILED"
+        )
+
+        print(
+            f"Error: {exc}"
         )
 
         raise RuntimeError(
             f"Summary generation failed: {exc}"
         )
 
-    summary = extract_json_result(
+    # ========================================================
+    # PARSE RESPONSE
+    # ========================================================
+
+    result = parse_json_response(
+        response
+    )
+
+    if not isinstance(
+        result,
+        dict
+    ):
+
+        raise RuntimeError(
+            "Groq analysis did not return a JSON object."
+        )
+
+    # ========================================================
+    # DEFAULT VALUES
+    # ========================================================
+
+    result.setdefault(
+        "title",
+        "YouTube Video Analysis"
+    )
+
+    result.setdefault(
+        "executive_summary",
+        ""
+    )
+
+    result.setdefault(
+        "key_points",
+        []
+    )
+
+    result.setdefault(
+        "important_concepts",
+        []
+    )
+
+    result.setdefault(
+        "action_items",
+        []
+    )
+
+    result.setdefault(
+        "conclusion",
+        ""
+    )
+
+    # ========================================================
+    # VALIDATE LISTS
+    # ========================================================
+
+    if not isinstance(
+        result.get(
+            "key_points"
+        ),
+        list
+    ):
+
+        result[
+            "key_points"
+        ] = []
+
+    if not isinstance(
+        result.get(
+            "important_concepts"
+        ),
+        list
+    ):
+
+        result[
+            "important_concepts"
+        ] = []
+
+    if not isinstance(
+        result.get(
+            "action_items"
+        ),
+        list
+    ):
+
+        result[
+            "action_items"
+        ] = []
+
+    # ========================================================
+    # CLEAN DATA
+    # ========================================================
+
+    result = clean_data(
         result
     )
 
-    if not summary:
-
-        raise RuntimeError(
-            "Groq returned an empty summary."
-        )
-
+    print()
     print(
         "AI summary generated successfully."
     )
 
+    print(
+        f"Title: {result.get('title', '')}"
+    )
+
+    print(
+        f"Key points: "
+        f"{len(result.get('key_points', []))}"
+    )
+
+    print(
+        f"Action items: "
+        f"{len(result.get('action_items', []))}"
+    )
+
+    # ========================================================
+    # IMPORTANT
+    #
+    # Action items are already generated by the same
+    # analysis request.
+    #
+    # We do NOT make another Groq call here.
+    #
+    # This reduces:
+    #
+    # - TPM usage
+    # - API cost
+    # - 429 errors
+    # - response time
+    #
+    # ========================================================
+
     return {
-        "summary": summary
+
+        "summary":
+            result,
+
+        "action_items":
+            result.get(
+                "action_items",
+                []
+            )
     }
 
 
 # ============================================================
 # NODE 4
-# GENERATE ACTION ITEMS
+# EVALUATE ANALYSIS
 # ============================================================
 
-def action_items_node(
-    state: AgentState
-) -> Dict[str, Any]:
+def evaluate_analysis_node(
+    state: VideoState
+):
 
-    print("[4] Generating action items...")
-
-    context = safe_string(
-        state.get("analysis_context")
-    ).strip()
-
-    summary = state.get(
-        "summary",
-        {}
-    )
-
-    system_prompt = """
-You are an expert YouTube content analyst.
-
-Identify practical and useful action items
-from the video.
-
-Return ONLY valid JSON.
-
-Use this structure:
-
-{
-    "action_items": [
-        {
-            "action": "Action to take",
-            "reason": "Why this action is useful",
-            "priority": "High"
-        }
-    ]
-}
-
-Priority must be one of:
-
-High
-Medium
-Low
-"""
-
-    user_prompt = f"""
-Based on the following video analysis and transcript,
-identify the most useful practical action items.
-
-VIDEO SUMMARY:
-
-{summary}
-
-TRANSCRIPT:
-
-{context}
-"""
-
-    try:
-
-        result = call_groq_json(
-            system_prompt,
-            user_prompt
-        )
-
-    except Exception as exc:
-
-        print(
-            f"Action item generation failed: {exc}"
-        )
-
-        raise RuntimeError(
-            f"Action item generation failed: {exc}"
-        )
-
-    parsed = extract_json_result(
-        result
-    )
-
-    action_items = parsed.get(
-        "action_items",
-        []
-    )
-
-    if not isinstance(
-        action_items,
-        list
-    ):
-
-        action_items = []
-
+    print()
     print(
-        f"Generated {len(action_items)} action items."
+        "[4] Evaluating video..."
     )
 
-    return {
-        "action_items": action_items
-    }
-
-
-# ============================================================
-# NODE 5
-# EVALUATE VIDEO
-# ============================================================
-
-def evaluation_node(
-    state: AgentState
-) -> Dict[str, Any]:
-
-    print("[5] Evaluating video...")
-
-    context = safe_string(
-        state.get("analysis_context")
-    ).strip()
-
-    summary = state.get(
-        "summary",
-        {}
+    summary = clean_data(
+        state.get(
+            "summary",
+            {}
+        )
     )
+
+    if not summary:
+
+        print(
+            "No summary available for evaluation."
+        )
+
+        return {
+
+            "evaluation": {
+                "accuracy": 0,
+                "completeness": 0,
+                "clarity": 0,
+                "usefulness": 0,
+                "overall_score": 0,
+                "feedback":
+                    "Evaluation could not be generated."
+            },
+
+            "quality_score": 0
+        }
+
+    # ========================================================
+    # EVALUATION PROMPT
+    # ========================================================
 
     system_prompt = """
-You are an expert video-content evaluator.
+You are a quality evaluator for YouTube video analysis.
 
-Evaluate the quality of the provided video content.
+Evaluate the provided analysis.
 
 Return ONLY valid JSON.
 
-Use this structure:
+Use ASCII characters only.
+
+Return exactly:
 
 {
-    "clarity": 0,
-    "educational_value": 0,
-    "depth": 0,
-    "practical_value": 0,
-    "engagement": 0,
-    "overall_score": 0,
-    "strengths": [
-        "Strength 1",
-        "Strength 2"
-    ],
-    "weaknesses": [
-        "Weakness 1",
-        "Weakness 2"
-    ],
-    "recommendation": "Recommendation"
+  "accuracy": 0,
+  "completeness": 0,
+  "clarity": 0,
+  "usefulness": 0,
+  "overall_score": 0,
+  "feedback": "string"
 }
 
-All scores must be between 0 and 10.
+Rules:
+
+1. Scores must be between 0 and 100.
+2. Return JSON only.
+3. No Markdown.
+4. No explanation outside JSON.
+5. Keep feedback concise.
 """
 
-    user_prompt = f"""
-Evaluate this YouTube video.
+    # ========================================================
+    # Keep evaluation input small
+    # ========================================================
 
-VIDEO SUMMARY:
+    summary_json = json.dumps(
+        summary,
+        ensure_ascii=True,
+        separators=(
+            ",",
+            ":"
+        )
+    )
 
-{summary}
-
-TRANSCRIPT:
-
-{context}
-"""
+    user_prompt = (
+        "Evaluate this YouTube analysis:\n\n"
+        +
+        summary_json
+    )
 
     try:
 
-        result = call_groq_json(
+        response = call_groq_json(
+
             system_prompt,
-            user_prompt
+
+            user_prompt,
+
+            # Small output to protect TPM
+            max_tokens=500,
+
+            retries=2
+        )
+
+        evaluation = parse_json_response(
+            response
         )
 
     except Exception as exc:
 
         print(
-            f"Video evaluation failed: {exc}"
+            f"Evaluation failed: {exc}"
         )
 
-        raise RuntimeError(
-            f"Video evaluation failed: {exc}"
-        )
-
-    evaluation = extract_json_result(
-        result
-    )
-
-    if not evaluation:
-
+        # Do not fail entire application
         evaluation = {
-            "overall_score": 0
+
+            "accuracy": 0,
+
+            "completeness": 0,
+
+            "clarity": 0,
+
+            "usefulness": 0,
+
+            "overall_score": 0,
+
+            "feedback":
+                "Evaluation could not be generated."
         }
 
-    quality_score = evaluation.get(
+    evaluation = clean_data(
+        evaluation
+    )
+
+    # ========================================================
+    # Get quality score
+    # ========================================================
+
+    score = evaluation.get(
         "overall_score",
         0
     )
 
     try:
 
-        quality_score = float(
-            quality_score
+        score = float(
+            score
         )
 
     except (
@@ -498,47 +974,76 @@ TRANSCRIPT:
         ValueError
     ):
 
-        quality_score = 0
+        score = 0
+
+    # Keep score between 0 and 100
+    score = max(
+        0,
+        min(
+            100,
+            score
+        )
+    )
 
     print(
         f"Video quality score: "
-        f"{quality_score}"
+        f"{score}"
     )
 
     return {
-        "evaluation": evaluation,
-        "quality_score": quality_score
+
+        "evaluation":
+            evaluation,
+
+        "quality_score":
+            score
     }
 
 
 # ============================================================
-# NODE 6
+# NODE 5
 # GENERATE PDF
 # ============================================================
 
-def pdf_node(
-    state: AgentState
-) -> Dict[str, Any]:
+def generate_pdf_node(
+    state: VideoState
+):
 
-    print("[6] Generating PDF report...")
-
-    youtube_url = safe_string(
-        state.get("youtube_url")
+    print()
+    print(
+        "[5] Generating PDF report..."
     )
 
-    summary = state.get(
-        "summary",
-        {}
+    # ========================================================
+    # Collect state
+    # ========================================================
+
+    youtube_url = clean_text(
+        state.get(
+            "youtube_url",
+            ""
+        )
     )
 
-    action_items = state.get(
-        "action_items",
-        []
+    summary = clean_data(
+        state.get(
+            "summary",
+            {}
+        )
     )
 
-    evaluation = state.get(
-        "evaluation",
-        {}
+    action_items = clean_data(
+        state.get(
+            "action_items",
+            []
+        )
+    )
+
+    evaluation = clean_data(
+        state.get(
+            "evaluation",
+            {}
+        )
     )
 
     quality_score = state.get(
@@ -546,68 +1051,141 @@ def pdf_node(
         0
     )
 
+    # ========================================================
+    # Final data cleaning
+    # ========================================================
+
+    summary = clean_data(
+        summary
+    )
+
+    action_items = clean_data(
+        action_items
+    )
+
+    evaluation = clean_data(
+        evaluation
+    )
+
+    # ========================================================
+    # Filename
+    # ========================================================
+
+    timestamp = datetime.now().strftime(
+        "%Y%m%d_%H%M%S"
+    )
+
+    filename = (
+        f"youtube_analysis_{timestamp}.pdf"
+    )
+
+    # ========================================================
+    # Generate PDF
+    #
+    # IMPORTANT:
+    # Your pdf_generator expects:
+    #
+    # youtube_url
+    # summary
+    # action_items
+    # evaluation
+    # quality_score
+    # output_filename
+    #
+    # ========================================================
+
     try:
 
         pdf_path = generate_pdf(
+
             youtube_url=youtube_url,
+
             summary=summary,
+
             action_items=action_items,
+
             evaluation=evaluation,
-            quality_score=quality_score
+
+            quality_score=quality_score,
+
+            output_filename=filename
         )
 
-    except TypeError:
+    except TypeError as exc:
 
-        # ----------------------------------------------------
-        # Compatibility fallback
-        #
-        # If your existing pdf_generator.py uses a different
-        # function signature, try passing the complete state.
-        # ----------------------------------------------------
-
-        try:
-
-            pdf_path = generate_pdf(
-                state
-            )
-
-        except Exception as exc:
-
-            print(
-                f"PDF generation failed: {exc}"
-            )
-
-            raise RuntimeError(
-                f"PDF generation failed: {exc}"
-            )
-
-    except Exception as exc:
+        print()
+        print(
+            "PDF GENERATOR SIGNATURE ERROR"
+        )
 
         print(
-            f"PDF generation failed: {exc}"
+            f"Error: {exc}"
         )
 
         raise RuntimeError(
             f"PDF generation failed: {exc}"
         )
+
+    except Exception as exc:
+
+        print()
+        print(
+            "PDF GENERATION FAILED"
+        )
+
+        print(
+            f"Error: {exc}"
+        )
+
+        raise RuntimeError(
+            f"PDF generation failed: {exc}"
+        )
+
+    # ========================================================
+    # Validate PDF path
+    # ========================================================
 
     if not pdf_path:
 
         raise RuntimeError(
-            "PDF generator did not return a path."
+            "PDF generator returned no file path."
         )
 
-    pdf_path = str(
+    pdf_path = Path(
         pdf_path
+    ).resolve()
+
+    if not pdf_path.exists():
+
+        raise RuntimeError(
+            f"Generated PDF does not exist: "
+            f"{pdf_path}"
+        )
+
+    if pdf_path.stat().st_size <= 0:
+
+        raise RuntimeError(
+            "Generated PDF is empty."
+        )
+
+    print()
+    print(
+        "PDF GENERATED SUCCESSFULLY"
     )
 
     print(
-        f"PDF generated successfully: "
-        f"{pdf_path}"
+        f"PDF path: {pdf_path}"
+    )
+
+    print(
+        f"PDF size: "
+        f"{pdf_path.stat().st_size} bytes"
     )
 
     return {
-        "pdf_path": pdf_path
+
+        "pdf_path":
+            str(pdf_path)
     }
 
 
@@ -617,93 +1195,88 @@ def pdf_node(
 
 def build_graph():
 
+    print()
     print(
         "Building Agentic AI graph..."
     )
 
+    # ========================================================
+    # Create StateGraph
+    # ========================================================
+
     workflow = StateGraph(
-        AgentState
+        VideoState
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Add nodes
-    # --------------------------------------------------------
+    # ========================================================
 
     workflow.add_node(
-        "transcript",
-        transcript_node
+        "extract_transcript",
+        extract_transcript_node
     )
 
     workflow.add_node(
-        "context",
-        context_node
+        "prepare_transcript",
+        prepare_transcript_node
     )
 
     workflow.add_node(
-        "summary",
-        summary_node
+        "analyze_video",
+        analyze_video_node
     )
 
     workflow.add_node(
-        "action_items",
-        action_items_node
+        "evaluate_analysis",
+        evaluate_analysis_node
     )
 
     workflow.add_node(
-        "evaluation",
-        evaluation_node
+        "generate_pdf",
+        generate_pdf_node
     )
 
-    workflow.add_node(
-        "pdf",
-        pdf_node
-    )
-
-    # --------------------------------------------------------
+    # ========================================================
     # Entry point
-    # --------------------------------------------------------
+    # ========================================================
 
     workflow.set_entry_point(
-        "transcript"
+        "extract_transcript"
     )
 
-    # --------------------------------------------------------
-    # Workflow edges
-    # --------------------------------------------------------
+    # ========================================================
+    # Workflow
+    # ========================================================
 
     workflow.add_edge(
-        "transcript",
-        "context"
-    )
-
-    workflow.add_edge(
-        "context",
-        "summary"
+        "extract_transcript",
+        "prepare_transcript"
     )
 
     workflow.add_edge(
-        "summary",
-        "action_items"
+        "prepare_transcript",
+        "analyze_video"
     )
 
     workflow.add_edge(
-        "action_items",
-        "evaluation"
+        "analyze_video",
+        "evaluate_analysis"
     )
 
     workflow.add_edge(
-        "evaluation",
-        "pdf"
+        "evaluate_analysis",
+        "generate_pdf"
     )
 
     workflow.add_edge(
-        "pdf",
+        "generate_pdf",
         END
     )
 
-    # --------------------------------------------------------
-    # Compile graph
-    # --------------------------------------------------------
+    # ========================================================
+    # Compile
+    # ========================================================
 
     graph = workflow.compile()
 
