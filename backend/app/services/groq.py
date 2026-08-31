@@ -52,7 +52,7 @@ DEFAULT_TEMPERATURE = 0.2
 
 # IMPORTANT:
 # Use max_completion_tokens instead of max_tokens
-DEFAULT_MAX_COMPLETION_TOKENS = 4096
+DEFAULT_MAX_COMPLETION_TOKENS = 2000
 
 MAX_RETRIES = 2
 
@@ -429,7 +429,7 @@ def call_groq(
 def call_groq_json(
     system_prompt: str,
     user_prompt: str,
-    max_tokens: int = 4096,
+    max_tokens: int = 2000,
     retries: int = MAX_RETRIES,
 ):
 

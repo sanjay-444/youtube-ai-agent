@@ -172,7 +172,7 @@ def context_node(
     # 18000 characters gives us a much safer request size.
     # --------------------------------------------------------
 
-    max_characters = 18000
+    max_characters = 10000
 
     if len(transcript) > max_characters:
 
